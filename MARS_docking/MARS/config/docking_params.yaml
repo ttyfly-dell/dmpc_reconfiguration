@@ -1,0 +1,52 @@
+# MARS Docking 参数配置
+
+# 机器人物理尺寸
+robot_length: 0.30          # 主体长度 (m)
+robot_width: 0.20           # 主体宽度 (m)
+leg_length: 0.15            # 前肢长度 (m)
+leg_width: 0.03             # 前肢宽度 (m, 仅可视化)
+dock_gap: 0.02              # 对接时两机身面间隙 (m)
+
+# 几何参数
+staging_distance: 0.6       # 预对接点距 dock_point 再往后的距离 (m)
+
+# MPC 参数
+mpc_horizon: 20             # 预测步数
+mpc_dt: 0.05                # 控制周期 (s), 20Hz
+
+# APPROACH 阶段
+approach_v_max: 0.3
+approach_omega_max: 0.8
+
+approach_Q: [10.0, 10.0, 5.0]
+approach_R: [0.1, 0.05]
+approach_Qf: [30.0, 30.0, 10.0]
+
+# ALIGN 阶段
+align_v_max: 0.1
+align_omega_max: 1.0
+align_Q: [5.0, 5.0, 20.0]
+align_R: [0.5, 0.1]
+align_Qf: [10.0, 10.0, 50.0]
+
+# FINAL_APPROACH 阶段
+final_v_max: 0.05
+final_omega_max: 0.3
+final_Q: [20.0, 20.0, 20.0]
+final_R: [1.0, 0.5]
+final_Qf: [50.0, 50.0, 50.0]
+
+# 阶段切换阈值
+approach_threshold: 0.10
+align_heading_threshold: 0.035  # ~2 deg
+dock_distance_threshold: 0.04   # 锥面引导补偿剩余
+lateral_abort_threshold: 0.05
+
+# 超时 (仿真时间, 秒)
+approach_timeout: 30.0
+align_timeout: 15.0
+final_timeout: 15.0
+
+# 独立安全层 (最终下发前硬限幅)
+safety_v_limit: 0.35
+safety_omega_limit: 2.0

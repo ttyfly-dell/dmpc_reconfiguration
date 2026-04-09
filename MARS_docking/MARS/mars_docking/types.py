@@ -1,0 +1,131 @@
+"""基础数据类型定义"""
+
+from dataclasses import dataclass, field
+from enum import Enum
+import math
+
+
+@dataclass
+class Pose2D:
+    """二维位姿 (x, y, theta)"""
+    x: float = 0.0
+    y: float = 0.0
+    theta: float = 0.0  # 弧度, [-pi, pi]
+
+    def distance_to(self, other: "Pose2D") -> float:
+        """计算到另一个位姿的欧氏距离"""
+        return math.hypot(self.x - other.x, self.y - other.y)
+
+    def copy(self) -> "Pose2D":
+        return Pose2D(self.x, self.y, self.theta)
+
+    def __repr__(self) -> str:
+        return (f"Pose2D(x={self.x:.3f}, y={self.y:.3f}, "
+                f"theta={math.degrees(self.theta):.1f}°)")
+
+
+class DockingPhase(Enum):
+    """对接阶段枚举"""
+    IDLE = 0            # 空闲, 等待对接指令
+    APPROACH = 1        # 趋近 staging point
+    ALIGN = 2           # 精确对齐航向
+    FINAL_APPROACH = 3  # 沿对接轴直线趋近
+    DOCKED = 4          # 对接完成
+    FAILED = 5          # 对接失败
+
+
+@dataclass
+class DockingConfig:
+    """对接参数配置"""
+
+    # --- 机器人物理尺寸 ---
+    robot_length: float = 0.376      # 主体长度 (m)
+    robot_width: float = 0.493       # 主体宽度 (m)
+    leg_length: float = 0.01        # 前肢长度 (m)
+    leg_width: float = 0.03         # 前肢宽度 (m, 仅可视化)
+    dock_gap: float = 0.02          # 对接时两机身面间隙 (m, 前肢覆盖)
+
+    # --- 几何参数 ---
+    # 三点对接结构 (均在 dock 轴线上):
+    #   approach_point ──(approach_distance)── staging_point ──(staging_distance)── dock_point
+    approach_distance: float = 0.4  # DMPC 导航远点距 dock 的距离 (m)
+    staging_distance:  float = 0.2  # MPC 对齐近点距 dock 的距离 (m), 同时是 ALIGN→FINAL 质量门
+
+    # --- MPC 参数 ---
+    mpc_horizon: int = 20         # 预测步数 N (2.0s look-ahead)
+    mpc_dt: float = 0.05            # 控制周期 (s), 即 20Hz
+
+    # --- APPROACH 阶段速度约束 ---
+    approach_v_max: float = 0.15     # 最大线速度 (m/s)
+    approach_omega_max: float = 0.20 # 最大角速度 (rad/s)
+    # --- ALIGN 阶段速度约束 ---
+    align_v_max: float = 0.10       # 最大线速度 (m/s), 减速以提高对齐精度
+    align_omega_max: float = 0.20    # 最大角速度 (rad/s)
+
+    # --- FINAL_APPROACH 阶段速度约束 ---
+    final_v_max: float = 0.10       # 最大线速度 (m/s)
+    final_omega_max: float = 0.05    # 最大角速度 (rad/s)
+
+    # --- MPC 权重 (Q: [q_lon, q_lat, q_head], R: [r_v, r_omega]) ---
+    # 代价在目标坐标系下分解, q_lon=纵向, q_lat=横向, q_head=航向
+    #
+    # APPROACH: 纵向+横向均衡, 航向代价置 0 (允许 MPC 规划大转弯弧线, 同 ALIGN 原理)
+    # q_head=0: 不惩罚运行代价中的航向偏差, 让优化器自由选择转弯时机
+    # Qf_head>0: 终端代价保证到达 approach_point 时航向正确
+    approach_Q: list = field(default_factory=lambda: [5.0, 50.0, 2.0])
+    approach_R: list = field(default_factory=lambda: [0.1, 3.0])
+    approach_Qf: list = field(default_factory=lambda: [20.0, 20.0, 10.0])
+
+    # ALIGN (bearing-blend 弧线追踪):
+    #   Q_head=0: 允许 MPC 自由偏航修正横向 (unicycle under-actuated 标准做法)
+    #   Qf_head>0: 终端约束保证 horizon 末尾航向正确
+    align_Q: list = field(default_factory=lambda: [15.0, 25.0, 0.0])
+    align_R: list = field(default_factory=lambda: [0.1, 3.0])
+    align_Qf: list = field(default_factory=lambda: [40.0, 60.0, 60.0])
+
+    # FINAL_APPROACH: 纵向+横向都高, 确保精确对齐
+    final_Q: list = field(default_factory=lambda: [40.0, 80.0, 30.0])
+    final_R: list = field(default_factory=lambda: [0.1, 0.01])
+    final_Qf: list = field(default_factory=lambda: [100.0, 200.0, 80.0])
+
+    # --- 阶段切换阈值 ---
+    # APPROACH → ALIGN: 到达 approach_point 附近时 DMPC 移交 MPC
+    approach_capture_dist: float = 0.10       # 距 approach_point 多近时切换到 MPC (m)
+
+    # ALIGN → FINAL_APPROACH 入口门槛 (轴线投影法下横向修正充分后再进)
+    align_to_final_lat: float = 0.025      # 横向偏差上限 (m), ~2.5cm
+    align_to_final_heading: float = 0.08   # 航向偏差上限 (rad, ~4.6°), 允许小角度进入
+    align_dwell_steps: int = 3             # 连续满足条件的步数 (3×0.05s = 0.15s)
+
+    # 对接完成判定 (三维度独立检查, 确保轴向对齐)
+    dock_lon_threshold: float = 0.04       # 纵向 (沿对接轴) 距离阈值 (m)
+    dock_lat_threshold: float = 0.02       # 横向偏差阈值 (m), 必须对齐
+    dock_heading_threshold: float = 0.05   # 航向偏差阈值 (rad, ~3°)
+
+    # FINAL_APPROACH 回退阈值 (宽松, 仅在偏差过大时中断)
+    lateral_abort_threshold: float = 0.04  # 横向超限时退回 ALIGN (m)
+
+    # --- 控制平滑 (增量惩罚 ΔU) ---
+    smooth_dv: float = 0.5       # Δv 权重: 抑制线速度突变
+    smooth_domega: float = 8.0   # Δω 权重: 抑制角速度突变
+
+    # --- DMPC 避障参数 (APPROACH 阶段多机碰撞软排斥) ---
+    dmpc_r_safe:        float = 0.40   # 碰撞排斥安全半径 (m)
+    dmpc_lambda_rep:    float = 80.0   # 排斥惩罚权重 (越大越强制绕行)
+    dmpc_max_obstacles: int   = 5      # 最大障碍物数量 (决定参数向量大小, 构建后固定)
+
+    # --- 头车运动 ---
+    anchor_v: float = 0  # 头车匀速前进速度 (m/s), 0 表示静止
+
+    # --- 调试开关 ---
+    lock_approach: bool = False  # True: 锁定在 APPROACH 阶段, 不切 ALIGN/FINAL
+
+    # --- 超时 (秒) ---
+    approach_timeout: float = 30.0
+    align_timeout: float = 25.0
+    final_timeout: float = 20.0
+
+    # --- 独立安全层 (硬限幅) ---
+    # 与阶段控制解耦, 在最终下发前统一生效
+    safety_v_limit: float = 0.35
+    safety_omega_limit: float = 2.0
