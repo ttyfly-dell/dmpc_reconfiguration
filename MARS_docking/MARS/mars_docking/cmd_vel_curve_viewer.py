@@ -61,6 +61,10 @@ class MpcTrajectoryViewer(Node):
 
         self._aruco_lpf_enable = bool(args.aruco_lpf_enable)
         self._aruco_lpf_tau = max(0.0, float(args.aruco_lpf_tau_sec))
+        self._aruco_outlier_reject_enable = bool(args.aruco_outlier_reject_enable)
+        self._aruco_outlier_max_dx = max(0.0, float(args.aruco_outlier_max_dx))
+        self._aruco_outlier_max_dy = max(0.0, float(args.aruco_outlier_max_dy))
+        self._aruco_outlier_max_dtheta = max(0.0, float(args.aruco_outlier_max_dtheta))
 
         self._input_is_tail_head = bool(args.input_is_tail_head)
         self._leader_tail_to_center = float(args.leader_tail_to_center_m)
@@ -77,6 +81,7 @@ class MpcTrajectoryViewer(Node):
         self._latest_follower_pose: Pose2D | None = None
         self._filtered_follower_pose: Pose2D | None = None
         self._last_aruco_time = 0.0
+        self._aruco_reject_count = 0
 
         # 实际轨迹缓存（用于对比）
         self._history_sec = max(2.0, float(args.history_sec))
@@ -138,6 +143,45 @@ class MpcTrajectoryViewer(Node):
         self._ax.set_aspect("equal", adjustable="box")
         self._ax.legend(loc="upper right")
 
+    def _reject_aruco_outlier(self, measured_pose: Pose2D) -> Pose2D:
+        """剔除单帧明显跳变的观测, 保持显示和控制输入一致稳定."""
+        if not self._aruco_outlier_reject_enable:
+            return measured_pose
+
+        reference = self._filtered_follower_pose
+        if reference is None:
+            reference = self._latest_follower_pose
+        if reference is None:
+            return measured_pose
+
+        dx = measured_pose.x - reference.x
+        dy = measured_pose.y - reference.y
+        dtheta = normalize_angle(measured_pose.theta - reference.theta)
+        if (
+            abs(dx) <= self._aruco_outlier_max_dx
+            and abs(dy) <= self._aruco_outlier_max_dy
+            and abs(dtheta) <= self._aruco_outlier_max_dtheta
+        ):
+            return measured_pose
+
+        self._aruco_reject_count += 1
+        self.get_logger().warn(
+            (
+                "Reject aruco outlier #%d: jump=(%.4f, %.4f, %.4f), "
+                "threshold=(%.4f, %.4f, %.4f)"
+            )
+            % (
+                self._aruco_reject_count,
+                dx,
+                dy,
+                dtheta,
+                self._aruco_outlier_max_dx,
+                self._aruco_outlier_max_dy,
+                self._aruco_outlier_max_dtheta,
+            )
+        )
+        return reference
+
     def _apply_aruco_lpf(self, measured_pose: Pose2D, now: float) -> Pose2D:
         if not self._aruco_lpf_enable or self._aruco_lpf_tau <= 0.0:
             self._filtered_follower_pose = measured_pose
@@ -168,13 +212,14 @@ class MpcTrajectoryViewer(Node):
         now = time.monotonic()
 
         # 与 ros2_mars_adapter_node.py 同映射
-        rel_x = -self._x_scale * float(msg.twist.linear.x)
+        rel_x = self._x_scale * float(msg.twist.linear.x)
         rel_y = self._y_scale * float(msg.twist.linear.y)
         if self._input_is_tail_head:
             rel_x -= (self._leader_tail_to_center + self._follower_head_to_center)
-        rel_yaw = normalize_angle(-self._yaw_scale * float(msg.twist.angular.z) - self._yaw_offset)
+        rel_yaw = normalize_angle(self._yaw_scale * float(msg.twist.angular.z) - self._yaw_offset)
 
         measured_pose = Pose2D(rel_x, rel_y, rel_yaw)
+        measured_pose = self._reject_aruco_outlier(measured_pose)
         self._latest_follower_pose = self._apply_aruco_lpf(measured_pose, now)
         self._last_aruco_time = now
 
@@ -383,6 +428,15 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--aruco-lpf-enable", action="store_true", default=True)
     p.add_argument("--no-aruco-lpf", action="store_false", dest="aruco_lpf_enable")
     p.add_argument("--aruco-lpf-tau-sec", type=float, default=0.08)
+    p.add_argument("--aruco-outlier-reject-enable", action="store_true", default=True)
+    p.add_argument(
+        "--no-aruco-outlier-reject",
+        action="store_false",
+        dest="aruco_outlier_reject_enable",
+    )
+    p.add_argument("--aruco-outlier-max-dx", type=float, default=0.03)
+    p.add_argument("--aruco-outlier-max-dy", type=float, default=0.03)
+    p.add_argument("--aruco-outlier-max-dtheta", type=float, default=0.12)
 
     p.add_argument("--input-is-tail-head", action="store_true", default=True)
     p.add_argument("--input-is-center-center", action="store_false", dest="input_is_tail_head")

@@ -58,6 +58,10 @@ class ArucoToMarsNode(Node):
         self.declare_parameter("output_omega_sign", 1.0)
         self.declare_parameter("aruco_lpf_enable", True)
         self.declare_parameter("aruco_lpf_tau_sec", 0.08)
+        self.declare_parameter("aruco_outlier_reject_enable", True)#异常值剔除开关
+        self.declare_parameter("aruco_outlier_max_dx", 0.03)#最大位移跳变阈值(米)
+        self.declare_parameter("aruco_outlier_max_dy", 0.03)#最大位移跳变阈值(米)
+        self.declare_parameter("aruco_outlier_max_dtheta", 0.12)#最大角度跳变阈值(弧度)
 
         # Measurement geometry compensation:
         # if input is "leader tail -> follower head" relative coordinate,
@@ -93,6 +97,19 @@ class ArucoToMarsNode(Node):
         self._output_omega_sign = float(self.get_parameter("output_omega_sign").value)
         self._aruco_lpf_enable = bool(self.get_parameter("aruco_lpf_enable").value)
         self._aruco_lpf_tau = max(0.0, float(self.get_parameter("aruco_lpf_tau_sec").value))
+        # ArUco 跳变剔除参数
+        self._aruco_outlier_reject_enable = bool(
+            self.get_parameter("aruco_outlier_reject_enable").value
+        )
+        self._aruco_outlier_max_dx = max(
+            0.0, float(self.get_parameter("aruco_outlier_max_dx").value)
+        )
+        self._aruco_outlier_max_dy = max(
+            0.0, float(self.get_parameter("aruco_outlier_max_dy").value)
+        )
+        self._aruco_outlier_max_dtheta = max(
+            0.0, float(self.get_parameter("aruco_outlier_max_dtheta").value)
+        )
         self._input_is_tail_head = bool(self.get_parameter("input_is_tail_head").value)
         self._leader_tail_to_center = float(
             self.get_parameter("leader_tail_to_center_m").value
@@ -132,6 +149,7 @@ class ArucoToMarsNode(Node):
         self._latest_follower_pose: Pose2D | None = None
         self._filtered_follower_pose: Pose2D | None = None
         self._last_aruco_time = 0.0
+        self._aruco_reject_count = 0
 
         self._aruco_sub = self.create_subscription(
             TwistStamped, aruco_topic, self._on_aruco, 10
@@ -145,6 +163,47 @@ class ArucoToMarsNode(Node):
             f"Adapter started: sub={aruco_topic}, pub={cmd_vel_topic}, hz={control_hz:.1f}"
         )
 
+    #跳变剔除
+    def _reject_aruco_outlier(self, measured_pose: Pose2D) -> Pose2D:
+        """剔除单帧明显跳变的观测, 避免错误位姿直接驱动控制器."""
+        if not self._aruco_outlier_reject_enable:
+            return measured_pose
+
+        reference = self._filtered_follower_pose
+        if reference is None:
+            reference = self._latest_follower_pose
+        if reference is None:
+            return measured_pose
+
+        dx = measured_pose.x - reference.x
+        dy = measured_pose.y - reference.y
+        dtheta = normalize_angle(measured_pose.theta - reference.theta)
+        if (
+            abs(dx) <= self._aruco_outlier_max_dx
+            and abs(dy) <= self._aruco_outlier_max_dy
+            and abs(dtheta) <= self._aruco_outlier_max_dtheta
+        ):
+            return measured_pose
+
+        self._aruco_reject_count += 1
+        self.get_logger().warn(
+            (
+                "Reject aruco outlier #%d: jump=(%.4f, %.4f, %.4f), "
+                "threshold=(%.4f, %.4f, %.4f)"
+            )
+            % (
+                self._aruco_reject_count,
+                dx,
+                dy,
+                dtheta,
+                self._aruco_outlier_max_dx,
+                self._aruco_outlier_max_dy,
+                self._aruco_outlier_max_dtheta,
+            )
+        )
+        return reference
+
+    #一阶低通滤波
     def _apply_aruco_lpf(self, measured_pose: Pose2D, now: float) -> Pose2D:
         """一阶低通滤波: y[k] = y[k-1] + alpha * (x[k] - y[k-1])."""
         if not self._aruco_lpf_enable or self._aruco_lpf_tau <= 0.0:
@@ -176,8 +235,8 @@ class ArucoToMarsNode(Node):
         # 相机中心坐标系: x前, y左, z上
         # 控制平面映射: x(前向)=x_cam, y(左向)=y_cam
         now = time.monotonic()
-        rel_x = -self._x_scale * float(msg.twist.linear.x)
-        rel_y = -self._y_scale * (float(msg.twist.linear.y))
+        rel_x = self._x_scale * float(msg.twist.linear.x)
+        rel_y = self._y_scale * (float(msg.twist.linear.y))
         if self._input_is_tail_head:
             rel_x -= (self._leader_tail_to_center + self._follower_head_to_center)
         rel_yaw = normalize_angle(
@@ -185,6 +244,7 @@ class ArucoToMarsNode(Node):
         )
 
         measured_pose = Pose2D(rel_x, rel_y, rel_yaw)
+        measured_pose = self._reject_aruco_outlier(measured_pose)
         self._latest_follower_pose = self._apply_aruco_lpf(measured_pose, now)
         self._last_aruco_time = now
 

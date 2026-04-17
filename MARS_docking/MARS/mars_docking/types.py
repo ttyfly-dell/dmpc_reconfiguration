@@ -52,7 +52,7 @@ class DockingConfig:
     staging_distance:  float = 0.2  # MPC 对齐近点距 dock 的距离 (m), 同时是 ALIGN→FINAL 质量门
 
     # --- MPC 参数 ---
-    mpc_horizon: int = 20         # 预测步数 N (2.0s look-ahead)
+    mpc_horizon: int = 200         # 预测步数 N (2.0s look-ahead)
     mpc_dt: float = 0.05            # 控制周期 (s), 即 20Hz
 
     # --- APPROACH 阶段速度约束 ---
